@@ -841,6 +841,101 @@ func TestAxiCustodyRecoveryJoinsDivergentLocalAndReviewedHistories(t *testing.T)
 	}
 }
 
+// TestAxiAlreadyReturnedCustodySettlesStalePrivateMirrorBeforeRun reproduces
+// the installed-upgrade canary: custody is already stamped and the worktree is
+// already at the recovered rebased head, but the authoritative private branch
+// still holds divergent submitted history and has no archive. Repeated recovery
+// must repair both refs before it reports success, then a real run must pass
+// admission immediately.
+func TestAxiAlreadyReturnedCustodySettlesStalePrivateMirrorBeforeRun(t *testing.T) {
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: rebaseCustodyScenario(t)})
+	h.CommitChange("init-returned-recover", "seed.txt", "seed\n", "seed returned recovery init")
+	initWorktree := h.AddWorktree("init-returned-recover")
+	if out, err := h.RunInDir(initWorktree, "init"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+
+	branch := "feature/returned-recover"
+	submitted := h.CommitChange(branch, "feature.txt", "unsafe\n", "add unsafe feature")
+	h.CommitChange("main", "upstream-advance.txt", "advance\n", "upstream advance")
+	if out, err := h.runGit(context.Background(), h.WorkDir, "push", "origin", "main"); err != nil {
+		t.Fatalf("advance upstream main: %v\n%s", err, out)
+	}
+
+	operator := h.AddWorktree(branch)
+	gateOut, err := h.RunInDir(operator, "axi", "run", "--intent", "recover an already-returned rebased branch")
+	if err != nil || !strings.Contains(gateOut, "rebase-1") {
+		t.Fatalf("initial review gate: %v\n%s", err, gateOut)
+	}
+	if out, fixErr := h.RunInDir(operator, "axi", "respond", "--action", "fix", "--findings", "rebase-1"); fixErr != nil {
+		t.Fatalf("review fix: %v\n%s", fixErr, out)
+	}
+	if out, abortErr := h.RunInDir(operator, "axi", "abort"); abortErr != nil {
+		t.Fatalf("axi abort: %v\n%s", abortErr, out)
+	}
+	run := h.WaitForRun(branch, 30*time.Second)
+	if run.Status != types.RunCancelled {
+		t.Fatalf("run status after abort = %s", run.Status)
+	}
+
+	gateDir := filepath.Join(h.NMHome, "repos", h.repoID()+".git")
+	preservedBytes, err := h.runGit(context.Background(), gateDir, "rev-parse", custody.RecoveryRef(run.ID))
+	if err != nil {
+		t.Fatalf("gate preserved head: %v\n%s", err, preservedBytes)
+	}
+	preserved := strings.TrimSpace(string(preservedBytes))
+	if _, ancErr := h.runGit(context.Background(), gateDir, "merge-base", "--is-ancestor", submitted, preserved); ancErr == nil {
+		t.Fatalf("fixture did not create divergent rebased history: %s is an ancestor of %s", submitted, preserved)
+	}
+	if out, gitErr := h.runGit(context.Background(), operator, "fetch", "--no-tags", gateDir, custody.RecoveryRef(run.ID)); gitErr != nil {
+		t.Fatalf("import preserved head: %v\n%s", gitErr, out)
+	}
+	if out, gitErr := h.runGit(context.Background(), operator, "reset", "--hard", preserved); gitErr != nil {
+		t.Fatalf("install recovered worktree head: %v\n%s", gitErr, out)
+	}
+
+	database, err := db.Open(paths.WithRoot(h.NMHome).DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stampErr := database.SetRunCustodyReturned(run.ID)
+	closeErr := database.Close()
+	if stampErr != nil || closeErr != nil {
+		t.Fatalf("install returned-custody stamp: %v, close: %v", stampErr, closeErr)
+	}
+	archiveRef := "refs/tags/no-mistakes-abandoned/" + branch + "/" + submitted
+	if got, gitErr := h.runGit(context.Background(), gateDir, "rev-parse", "refs/heads/"+branch); gitErr != nil || strings.TrimSpace(string(got)) != submitted {
+		t.Fatalf("stale private mirror = %s (err %v), want %s", strings.TrimSpace(string(got)), gitErr, submitted)
+	}
+	if _, gitErr := h.runGit(context.Background(), gateDir, "show-ref", "--verify", archiveRef); gitErr == nil {
+		t.Fatalf("canary fixture unexpectedly has archive %s", archiveRef)
+	}
+
+	recoverOut, err := h.RunInDir(operator, "axi", "sync", "--recover")
+	if err != nil {
+		t.Fatalf("already-returned recovery failed: %v\n%s", err, recoverOut)
+	}
+	for _, want := range []string{"recovered: true", "changed: false", "state: custody_returned"} {
+		if !strings.Contains(recoverOut, want) {
+			t.Errorf("already-returned recovery output missing %q:\n%s", want, recoverOut)
+		}
+	}
+	if got, gitErr := h.runGit(context.Background(), gateDir, "rev-parse", "refs/heads/"+branch); gitErr != nil || strings.TrimSpace(string(got)) != preserved {
+		t.Fatalf("authoritative private mirror = %s (err %v), want %s", strings.TrimSpace(string(got)), gitErr, preserved)
+	}
+	if got, gitErr := h.runGit(context.Background(), gateDir, "rev-parse", archiveRef); gitErr != nil || strings.TrimSpace(string(got)) != submitted {
+		t.Fatalf("private mirror archive %s = %s (err %v), want %s", archiveRef, strings.TrimSpace(string(got)), gitErr, submitted)
+	}
+
+	freshOut, err := h.RunInDir(operator, "axi", "run", "--intent", "validate returned-custody mirror repair")
+	if err != nil {
+		t.Fatalf("fresh pipeline start after mirror repair: %v\n%s", err, freshOut)
+	}
+	if !strings.Contains(freshOut, "gate:") {
+		t.Fatalf("fresh pipeline did not cross admission after mirror repair:\n%s", freshOut)
+	}
+}
+
 // TestAxiPrePushAbortUnmovedHeadCustodyJourney reproduces the ownership gap
 // hit when delivery switches to a direct PR mid-validation: the worker aborts
 // the run at the review gate BEFORE the pipeline changes anything, so the

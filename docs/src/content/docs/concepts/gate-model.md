@@ -138,6 +138,9 @@ submission hook. An unrelated or concurrently changed mirror refuses recovery;
 an absent gate or branch has no stale private state to settle. This ordering
 prevents a successful recovery from leaving the next fresh AXI submission to
 rediscover and reject the same private-only commits.
+Recovery rechecks this settlement when an older run already has a
+custody-return stamp, repairing the pre-contract state instead of treating the
+stamp alone as idempotent success.
 
 Publication plans reconciliation before pushing and applies it only after
 verifying the upstream head. If mirror settlement then fails or is cancelled,

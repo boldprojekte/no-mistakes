@@ -656,9 +656,7 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	}
 	state, run, _ := s.inspect(ctx)
 	if run != nil && run.CustodyReturnedAt != nil {
-		state.Recovered = true
-		state.Changed = false
-		return state
+		return s.finishReturnedCustodyRecovery(ctx, state, run)
 	}
 	// A branch released by its terminal outcome is already the operator's:
 	// nothing pipeline-created exists to recover, so recovery is an idempotent
@@ -1476,8 +1474,7 @@ func (s *Service) finishRecover(ctx context.Context, run *db.Run, expectedHead s
 		state.NextAction = &NextAction{Code: "recover_custody", Command: "no-mistakes axi sync --recover"}
 		return state
 	}
-	allowedMirrorHeads := []string{ptr(run.SubmittedHeadSHA), run.HeadSHA, ptr(run.LastPushedSHA), ptr(run.ReviewApprovedHeadSHA)}
-	if _, err := gatepkg.AdvancePrivateMirrorForRecovery(ctx, s.GateDir, wd, run.Branch, expectedHead, allowedMirrorHeads...); err != nil {
+	if err := s.settleRecoveryMirror(ctx, run, expectedHead); err != nil {
 		state, _, _ := s.inspect(ctx)
 		state.Changed = changed
 		state.Safety = "blocked_recover_mirror_update_failed"
@@ -1508,6 +1505,51 @@ func (s *Service) finishRecover(ctx context.Context, run *db.Run, expectedHead s
 	state.Recovered = true
 	state.Changed = changed
 	return state
+}
+
+// finishReturnedCustodyRecovery repairs the private-mirror postcondition for a
+// run stamped by an older recovery path. Custody being returned makes the
+// current branch head operator-owned; it does not make a stale authoritative
+// private branch safe for the next submission.
+func (s *Service) finishReturnedCustodyRecovery(ctx context.Context, state State, run *db.Run) State {
+	wd := s.workDir()
+	branch, branchErr := git.CurrentBranch(ctx, wd)
+	head, headErr := git.HeadSHA(ctx, wd)
+	if branchErr != nil || branch != run.Branch || headErr != nil || head != state.Local.Head {
+		state.Recovered = false
+		state.Changed = false
+		state.Safety = "blocked_recover_assumptions_changed"
+		state.Error = "the returned-custody branch changed before its private mirror could be settled"
+		state.NextAction = &NextAction{Code: "recover_custody", Command: "no-mistakes axi sync --recover"}
+		return state
+	}
+	if err := s.settleRecoveryMirror(ctx, run, head); err != nil {
+		state.Recovered = false
+		state.Changed = false
+		state.Safety = "blocked_recover_mirror_update_failed"
+		state.Error = fmt.Sprintf("custody is already returned, but the authoritative private mirror could not be archived and advanced: %v", err)
+		state.NextAction = &NextAction{Code: "recover_custody", Command: "no-mistakes axi sync --recover"}
+		return state
+	}
+	branch, branchErr = git.CurrentBranch(ctx, wd)
+	currentHead, currentHeadErr := git.HeadSHA(ctx, wd)
+	if branchErr != nil || branch != run.Branch || currentHeadErr != nil || currentHead != head {
+		state.Recovered = false
+		state.Changed = false
+		state.Safety = "blocked_recover_assumptions_changed"
+		state.Error = "the returned-custody branch changed after its private mirror was settled"
+		state.NextAction = &NextAction{Code: "recover_custody", Command: "no-mistakes axi sync --recover"}
+		return state
+	}
+	state.Recovered = true
+	state.Changed = false
+	return state
+}
+
+func (s *Service) settleRecoveryMirror(ctx context.Context, run *db.Run, expectedHead string) error {
+	allowedMirrorHeads := []string{ptr(run.SubmittedHeadSHA), run.HeadSHA, ptr(run.LastPushedSHA), ptr(run.ReviewApprovedHeadSHA)}
+	_, err := gatepkg.AdvancePrivateMirrorForRecovery(ctx, s.GateDir, s.workDir(), run.Branch, expectedHead, allowedMirrorHeads...)
+	return err
 }
 
 // finishKeepLocalRecover stamps custody returned on the preflighted runs.

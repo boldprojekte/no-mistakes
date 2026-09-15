@@ -303,6 +303,14 @@ func AdvancePrivateMirrorForRecovery(ctx context.Context, gateDir, workDir, bran
 	if _, err := git.Run(ctx, gateDir, "update-ref", "--no-deref", branchRef, liveHead, privateHead); err != nil {
 		return result, fmt.Errorf("advance recovered private mirror ref %s from %s to %s: %w", branchRef, privateHead, liveHead, err)
 	}
+	publishedHead, published, err := git.DirectRefTarget(ctx, gateDir, branchRef)
+	if err != nil || !published || publishedHead != liveHead {
+		return result, fmt.Errorf("verify recovered private mirror ref %s at %s: head=%s exists=%t err=%v", branchRef, liveHead, publishedHead, published, err)
+	}
+	archivedHead, archived, err = git.DirectRefTarget(ctx, gateDir, archiveTag)
+	if err != nil || !archived || archivedHead != privateHead {
+		return result, fmt.Errorf("verify recovered private mirror archive tag %s at %s: head=%s exists=%t err=%v", archiveTag, privateHead, archivedHead, archived, err)
+	}
 	return StaleBranchReconciliation{Reconciled: true, PreviousHead: privateHead, ArchivedTag: archiveTag}, nil
 }
 

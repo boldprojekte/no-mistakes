@@ -11,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	gatepkg "github.com/kunchenguid/no-mistakes/internal/gate"
 	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	pipelinepkg "github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -2535,12 +2536,11 @@ func TestRecoverTerminalUnverifiedRewriteNegativeControls(t *testing.T) {
 	})
 }
 
-// TestRecoverRebasedPreservedHeadAdoptsWithoutEscalating is the regression for
-// the over-escalating custody return: a cancelled validation whose preserved
-// pipeline head is the operator's own work rebased onto a newer base loses
-// nothing by adopting it, so recovery must succeed instead of refusing as
-// diverged. The relationship is invisible to equality and ancestry alone, which
-// is exactly what made the old decision escalate.
+// TestRecoverRebasedPreservedHeadAdoptsWithoutEscalating covers both the
+// original rebase recovery and the installed-upgrade counterexample: a run may
+// already have its custody-return stamp while the authoritative private mirror
+// still holds the divergent submitted history. Repeated recovery must repair
+// that stale mirror before it can report idempotent success.
 func TestRecoverRebasedPreservedHeadAdoptsWithoutEscalating(t *testing.T) {
 	t.Parallel()
 
@@ -2594,6 +2594,29 @@ func TestRecoverRebasedPreservedHeadAdoptsWithoutEscalating(t *testing.T) {
 	}
 	if !f.custodyReturned() {
 		t.Fatal("custody not stamped")
+	}
+
+	// Recreate the second canary exactly: an older successful recovery stamped
+	// custody but left the divergent submitted history authoritative and
+	// created no archive.
+	mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", f.submitted, f.preserved)
+	mustRun(t, f.gate, "update-ref", "-d", archiveTag)
+	if !f.custodyReturned() {
+		t.Fatal("fixture lost the already-returned custody stamp")
+	}
+	second := f.service.Recover(f.ctx, false)
+	if !second.Recovered || second.Changed || second.State != StateCustodyReturned {
+		t.Fatalf("already-returned recovery did not settle stale mirror: %#v", second)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.preserved {
+		t.Fatalf("already-returned recovery left private mirror at %s, want %s", got, f.preserved)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", archiveTag); got != f.submitted {
+		t.Fatalf("already-returned recovery archive %s = %s, want %s", archiveTag, got, f.submitted)
+	}
+	plan, err := gatepkg.PlanStaleBranchReconciliation(f.ctx, f.gate, f.local, "feature/recover", f.preserved, "")
+	if err != nil || plan.Reconcile {
+		t.Fatalf("immediate submission still fails admission: plan=%+v err=%v", plan, err)
 	}
 }
 
