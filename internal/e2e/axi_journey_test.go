@@ -694,12 +694,13 @@ func rebaseCustodyScenario(t *testing.T) string {
 	return path
 }
 
-// TestAxiCustodyRecoveryJoinsDivergentLocalAndReviewedHistories reproduces the
-// terminal failure shape that used to strand a task: the pipeline rebased and
-// fixed its reviewed head, while the clean task branch retained a different
-// local commit. Neither history contains the other. The real AXI recovery must
-// create one ordinary merge commit with both exact heads as parents, keep the
-// gate at the preserved head, and return custody for a fresh run.
+// TestAxiCustodyRecoveryJoinsDivergentLocalAndReviewedHistories reproduces two
+// coupled terminal-recovery failures against the real daemon: the pipeline
+// rebased and fixed its reviewed head while the clean task branch retained a
+// different local commit, then successful recovery had previously left the
+// authoritative private mirror on its stale pre-recovery head. Recovery must
+// create one ordinary merge commit with both exact heads as parents, archive
+// and advance that mirror, return custody, and admit a fresh run.
 func TestAxiCustodyRecoveryJoinsDivergentLocalAndReviewedHistories(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: rebaseCustodyScenario(t)})
 	h.CommitChange("init-rebase-recover", "seed.txt", "seed\n", "seed rebase recover init")
@@ -821,6 +822,13 @@ func TestAxiCustodyRecoveryJoinsDivergentLocalAndReviewedHistories(t *testing.T)
 	localAnchor := "refs/no-mistakes/recover-local/" + run.ID
 	if got, gitErr := h.runGit(context.Background(), operator, "rev-parse", localAnchor); gitErr != nil || strings.TrimSpace(string(got)) != localHead {
 		t.Fatalf("pre-recovery anchor %s = %s (err %v), want local %s", localAnchor, strings.TrimSpace(string(got)), gitErr, localHead)
+	}
+	if got, gitErr := h.runGit(context.Background(), gateDir, "rev-parse", "refs/heads/feature/rebase-recover"); gitErr != nil || strings.TrimSpace(string(got)) != merged {
+		t.Fatalf("authoritative private mirror = %s (err %v), want recovered head %s", strings.TrimSpace(string(got)), gitErr, merged)
+	}
+	mirrorArchive := "refs/tags/no-mistakes-abandoned/feature/rebase-recover/" + submitted
+	if got, gitErr := h.runGit(context.Background(), gateDir, "rev-parse", mirrorArchive); gitErr != nil || strings.TrimSpace(string(got)) != submitted {
+		t.Fatalf("pre-recovery mirror archive %s = %s (err %v), want %s", mirrorArchive, strings.TrimSpace(string(got)), gitErr, submitted)
 	}
 
 	// Custody is back: a fresh run starts cleanly on the joined head.

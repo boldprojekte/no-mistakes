@@ -14,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	gatepkg "github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/gatecontext"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -816,7 +817,7 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 		if keepLocal {
 			return s.finishKeepLocalRecover(ctx, state, []string{run.ID})
 		}
-		return s.finishRecover(ctx, run, false)
+		return s.finishRecover(ctx, run, local, false)
 	}
 
 	if objectExists(ctx, wd, preserved) && relationBetween(ctx, wd, local, preserved) == RelationDiverged && !keepLocal {
@@ -883,7 +884,7 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 		if keepLocal {
 			return s.finishKeepLocalRecover(ctx, state, []string{run.ID})
 		}
-		return s.finishRecover(ctx, run, false)
+		return s.finishRecover(ctx, run, local, false)
 	case isAncestor(ctx, wd, local, preserved):
 		if keepLocal {
 			return s.recoverKeepLocalAtCurrentHead(ctx, run, state, []string{run.ID}, []string{run.HeadSHA})
@@ -1094,7 +1095,7 @@ func (s *Service) recoverKeepLocalFromArchive(ctx context.Context, run *db.Run, 
 		}
 		gateMoved = true
 	}
-	result := s.finishRecover(ctx, run, false)
+	result := s.finishRecover(ctx, run, state.Local.Head, false)
 	if gateMoved && !result.Recovered {
 		branchRef := "refs/heads/" + state.Local.Branch
 		if _, err := git.Run(context.WithoutCancel(ctx), s.GateDir, "update-ref", branchRef, gateHead, state.Local.Head); err != nil {
@@ -1137,7 +1138,7 @@ func (s *Service) recoverFastForward(ctx context.Context, run *db.Run, state Sta
 		state.NextAction = &NextAction{Code: "inspect_worktree", Command: "git status"}
 		return state
 	}
-	return s.finishRecover(ctx, run, true)
+	return s.finishRecover(ctx, run, preserved, true)
 }
 
 // preservedContainsLocalWork proves the preserved pipeline head already carries
@@ -1306,7 +1307,7 @@ func (s *Service) recoverAdoptPreserved(ctx context.Context, run *db.Run, state 
 		state.NextAction = &NextAction{Code: "inspect_worktree", Command: "git status"}
 		return state
 	}
-	return s.finishRecover(ctx, run, true)
+	return s.finishRecover(ctx, run, preserved, true)
 }
 
 // recoverJoinPreservedHistories creates one ordinary merge commit whose first
@@ -1443,7 +1444,7 @@ func (s *Service) recoverJoinPreservedHistories(ctx context.Context, run *db.Run
 		state.NextAction = &NextAction{Code: "inspect_worktree", Command: "git status"}
 		return state
 	}
-	return s.finishRecover(ctx, freshRun, true)
+	return s.finishRecover(ctx, freshRun, mergedHead, true)
 }
 
 func (s *Service) anchorReachablePreserved(ctx context.Context, state State, runID, preserved string) (State, bool) {
@@ -1457,15 +1458,50 @@ func (s *Service) anchorReachablePreserved(ctx context.Context, state State, run
 	return State{}, true
 }
 
-// finishRecover stamps custody returned and reports the fresh post-recovery
-// truth. changed reports whether this call moved the worktree HEAD.
-func (s *Service) finishRecover(ctx context.Context, run *db.Run, changed bool) State {
+// finishRecover first settles the authoritative private mirror at the exact
+// recovered worktree head, then stamps custody returned. The old mirror head is
+// archived by internal/gate before its compare-and-swap advance, so a later AXI
+// submission cannot rediscover the same private-only commits and refuse after
+// recovery already reported success.
+func (s *Service) finishRecover(ctx context.Context, run *db.Run, expectedHead string, changed bool) State {
+	wd := s.workDir()
+	branch, branchErr := git.CurrentBranch(ctx, wd)
+	head, headErr := git.HeadSHA(ctx, wd)
+	clean, _ := worktreeClean(ctx, wd)
+	if branchErr != nil || branch != run.Branch || headErr != nil || head != expectedHead || !clean {
+		state, _, _ := s.inspect(ctx)
+		state.Changed = changed
+		state.Safety = "blocked_recover_assumptions_changed"
+		state.Error = "the recovered branch or worktree changed before the private mirror could be settled; custody was not recorded"
+		state.NextAction = &NextAction{Code: "recover_custody", Command: "no-mistakes axi sync --recover"}
+		return state
+	}
+	allowedMirrorHeads := []string{ptr(run.SubmittedHeadSHA), run.HeadSHA, ptr(run.LastPushedSHA), ptr(run.ReviewApprovedHeadSHA)}
+	if _, err := gatepkg.AdvancePrivateMirrorForRecovery(ctx, s.GateDir, wd, run.Branch, expectedHead, allowedMirrorHeads...); err != nil {
+		state, _, _ := s.inspect(ctx)
+		state.Changed = changed
+		state.Safety = "blocked_recover_mirror_update_failed"
+		state.Error = fmt.Sprintf("the recovered worktree head is safe, but the authoritative private mirror could not be archived and advanced: %v; custody was not recorded", err)
+		state.NextAction = &NextAction{Code: "recover_custody", Command: "no-mistakes axi sync --recover"}
+		return state
+	}
+	branch, branchErr = git.CurrentBranch(ctx, wd)
+	head, headErr = git.HeadSHA(ctx, wd)
+	clean, _ = worktreeClean(ctx, wd)
+	if branchErr != nil || branch != run.Branch || headErr != nil || head != expectedHead || !clean {
+		state, _, _ := s.inspect(ctx)
+		state.Changed = changed
+		state.Safety = "blocked_recover_assumptions_changed"
+		state.Error = "the local branch changed after the private mirror advanced to the recovered head; custody was not recorded and no history was deleted"
+		state.NextAction = &NextAction{Code: "recover_custody", Command: "no-mistakes axi sync --recover"}
+		return state
+	}
 	if err := s.DB.SetRunCustodyReturned(run.ID); err != nil {
 		state, _, _ := s.inspect(ctx)
 		state.Changed = changed
 		state.Safety = "blocked_recover_stamp_failed"
-		state.Error = "the custody return could not be recorded; re-run the recovery"
-		state.NextAction = nil
+		state.Error = "the private mirror reached the recovered head, but the custody return could not be recorded; re-run the recovery"
+		state.NextAction = &NextAction{Code: "recover_custody", Command: "no-mistakes axi sync --recover"}
 		return state
 	}
 	state, _, _ := s.inspect(ctx)

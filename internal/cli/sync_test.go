@@ -1129,8 +1129,12 @@ func TestAxiSyncRecoverDivergedJoinsBothHistories(t *testing.T) {
 	for _, head := range []string{localHead, f.preserved} {
 		cliGit(t, f.local, "merge-base", "--is-ancestor", head, merged)
 	}
-	if got := cliGit(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.preserved {
-		t.Fatalf("recovery moved gate backward to %s", got)
+	if got := cliGit(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != merged {
+		t.Fatalf("authoritative private mirror = %s, want recovered merge %s", got, merged)
+	}
+	archiveTag := "refs/tags/no-mistakes-abandoned/feature/recover/" + f.preserved
+	if got := cliGit(t, f.gate, "rev-parse", archiveTag); got != f.preserved {
+		t.Fatalf("private mirror archive %s = %s, want %s", archiveTag, got, f.preserved)
 	}
 }
 
@@ -1289,8 +1293,12 @@ func TestAxiArchiveBackedRecoveryJoinsExactRequiredAndPreservedHistories(t *test
 	if got := cliGit(t, f.gate, "rev-parse", "refs/no-mistakes/recover/"+f.runID); got != f.preserved {
 		t.Fatalf("gate recovery ref = %s, want preserved later head %s", got, f.preserved)
 	}
-	if got := cliGit(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != gateBefore {
-		t.Fatalf("gate branch moved from %s to %s", gateBefore, got)
+	if got := cliGit(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != merged {
+		t.Fatalf("authoritative private mirror = %s, want recovered merge %s", got, merged)
+	}
+	mirrorArchive := "refs/tags/no-mistakes-abandoned/feature/recover/" + gateBefore
+	if got := cliGit(t, f.gate, "rev-parse", mirrorArchive); got != gateBefore {
+		t.Fatalf("private mirror archive %s = %s, want %s", mirrorArchive, got, gateBefore)
 	}
 }
 

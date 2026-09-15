@@ -519,7 +519,8 @@ func TestRecoverDirtyWorktreeRefusesWithoutMutation(t *testing.T) {
 // strand a clean local commit beside a terminal reviewed commit. The old
 // manual-reconciliation refusal masked that Git could merge the smallest
 // counterexample exactly: independent files. Recovery must produce one merge
-// commit and make both exact heads ancestors without moving the gate backward.
+// commit, make both exact heads ancestors, archive the old private mirror, and
+// advance that mirror to the recovered head before returning custody.
 func TestRecoverDivergedJoinsBothHistories(t *testing.T) {
 	t.Parallel()
 
@@ -549,8 +550,12 @@ func TestRecoverDivergedJoinsBothHistories(t *testing.T) {
 	for _, head := range []string{localHead, f.preserved} {
 		mustRun(t, f.local, "merge-base", "--is-ancestor", head, mergedHead)
 	}
-	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.preserved {
-		t.Fatalf("recovery moved gate branch backward to %s", got)
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != mergedHead {
+		t.Fatalf("authoritative private mirror = %s, want recovered merge %s", got, mergedHead)
+	}
+	archiveTag := "refs/tags/no-mistakes-abandoned/feature/recover/" + f.preserved
+	if got := mustRun(t, f.gate, "rev-parse", archiveTag); got != f.preserved {
+		t.Fatalf("private mirror archive %s = %s, want %s", archiveTag, got, f.preserved)
 	}
 	if got := mustRun(t, f.local, "show", "HEAD:rescope.txt"); got != "rescope" {
 		t.Fatalf("merged tree lost local content: %q", got)
@@ -681,8 +686,12 @@ func TestBoundArchiveRecoversByJoiningBothExactHistories(t *testing.T) {
 	if got := mustRun(t, f.local, "rev-parse", archiveRef); got != f.preserved {
 		t.Fatalf("archive ref = %s, want preserved %s", got, f.preserved)
 	}
-	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.preserved {
-		t.Fatalf("recovery moved gate branch away from preserved head: %s", got)
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != mergedHead {
+		t.Fatalf("authoritative private mirror = %s, want recovered merge %s", got, mergedHead)
+	}
+	archiveTag := "refs/tags/no-mistakes-abandoned/feature/recover/" + f.preserved
+	if got := mustRun(t, f.gate, "rev-parse", archiveTag); got != f.preserved {
+		t.Fatalf("private mirror archive %s = %s, want %s", archiveTag, got, f.preserved)
 	}
 }
 
@@ -876,9 +885,9 @@ func TestRecoverKeepLocalDirtyBehindReturnsCustodyWithoutTouchingWorktree(t *tes
 	}
 }
 
-// TestRecoverGateDivergenceAndUnavailabilityFailClosed: an independently moved
-// gate no longer hides a separately anchored preserved head, while deleted or
-// unavailable preservation still refuses.
+// TestRecoverGateDivergenceAndUnavailabilityFailClosed proves that recovery
+// never overwrites an independently moved gate branch. A missing gate or branch
+// has no stale mirror to settle; unavailable preservation still refuses.
 func TestRecoverGateDivergenceAndUnavailabilityFailClosed(t *testing.T) {
 	t.Parallel()
 
@@ -894,14 +903,17 @@ func TestRecoverGateDivergenceAndUnavailabilityFailClosed(t *testing.T) {
 		mustRun(t, writer, "push", "origin", "HEAD:refs/heads/feature/recover")
 		movedGate := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover")
 		state := f.service.Recover(f.ctx, false)
-		if !state.Recovered || !state.Changed {
+		if state.Recovered || !state.Changed || state.Safety != "blocked_recover_mirror_update_failed" {
 			t.Fatalf("recover with moved gate = %#v", state)
 		}
 		if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.preserved {
-			t.Fatalf("moved-gate recovery HEAD = %s, want %s", got, f.preserved)
+			t.Fatalf("safely recovered local HEAD = %s, want %s", got, f.preserved)
 		}
 		if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != movedGate {
 			t.Fatalf("recovery rewrote independent gate head = %s, want %s", got, movedGate)
+		}
+		if f.custodyReturned() {
+			t.Fatal("moved-gate refusal stamped custody")
 		}
 	})
 	t.Run("gate branch deleted with recovery ref", func(t *testing.T) {
@@ -2538,6 +2550,10 @@ func TestRecoverRebasedPreservedHeadAdoptsWithoutEscalating(t *testing.T) {
 	}
 	// The bug's masking condition: neither head is an ancestor of the other.
 	mustRun(t, f.local, "fetch", "--no-tags", f.gate, "+refs/heads/feature/recover:refs/no-mistakes/test/preserved")
+	mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", f.submitted, f.preserved)
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.submitted {
+		t.Fatalf("canary private mirror = %s, want submitted head %s", got, f.submitted)
+	}
 	if isAncestor(f.ctx, f.local, f.submitted, f.preserved) || isAncestor(f.ctx, f.local, f.preserved, f.submitted) {
 		t.Fatal("fixture is not a rebase divergence: one head is an ancestor of the other")
 	}
@@ -2568,6 +2584,13 @@ func TestRecoverRebasedPreservedHeadAdoptsWithoutEscalating(t *testing.T) {
 	}
 	if got := mustRun(t, f.local, "rev-parse", f.localAnchorRef()); got != f.submitted {
 		t.Fatalf("pre-recovery local head was not anchored: %s, want %s", got, f.submitted)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.preserved {
+		t.Fatalf("successful recovery left private mirror at %s, want recovered head %s", got, f.preserved)
+	}
+	archiveTag := "refs/tags/no-mistakes-abandoned/feature/recover/" + f.submitted
+	if got := mustRun(t, f.gate, "rev-parse", archiveTag); got != f.submitted {
+		t.Fatalf("private mirror archive %s = %s, want %s", archiveTag, got, f.submitted)
 	}
 	if !f.custodyReturned() {
 		t.Fatal("custody not stamped")
