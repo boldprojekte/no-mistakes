@@ -303,17 +303,16 @@ Bounded review contract:
 	// finding, not a general instruction to emit fewer of them.
 	//
 	// The dedicated Simplification section asks a different question from the
-	// defect pass: not "is this component correct" but "does the intent
-	// require this component at all". A reviewed spiral (backpass PR #107)
+	// defect pass: whether this change materially introduced concepts or surface
+	// beyond what its accepted intent needs. A reviewed spiral (backpass PR #107)
 	// showed why the defect pass alone cannot catch over-engineering: a
 	// permissive resolver with seven acceptance branches and a second,
 	// skill-only budget semantics each yielded a concrete, intended-usage
 	// defect per round, so every finding cleared the evidence threshold and
 	// every fix hardened the unrequired path instead of removing it, across
-	// thirteen rounds that never converged. The section reports the unrequired
-	// component itself as an ask-user warning whose remedy is removal, and asks
-	// defect findings inside such a component to name removal too, so the
-	// fixer's removal rule has something to act on. It stays ask-user because
+	// thirteen rounds that never converged. The section keeps removal as the
+	// remedy for material excess, but does not turn every implementation detail
+	// absent from the intent's wording into a finding. It stays ask-user because
 	// whether extra surface is wanted is the author's call; the section
 	// deliberately adds no schema field or second reviewer.
 	prompt := fmt.Sprintf(
@@ -337,12 +336,12 @@ Task:
 - Report an authorization or privacy finding only with source-backed evidence of a concrete reachable operation or disclosure path. Identify the protected resource or field, the bypass or missing control, and the resulting unauthorized action or exposure. Do not infer a finding merely because middleware, an authorization call, or an auth-related test is absent by name; accept equivalent controls and intentionally public data when the source proves them.
 - Repository instructions own access policy. If changed behavior introduces a concrete material operation or disclosure involving potentially protected resources or user data, and the instructions and source do not establish whether it is allowed, you MUST emit an "ask-user" finding that names the missing policy decision. Do not report immaterial or pre-existing ambiguity, and do not invent access policy. A source-proven routine defect retains the existing "auto-fix" semantics.
 - When source evidence proves the failure remains reachable, report the concrete path and recommend the earliest supported shared boundary that would make the invariant hold, rather than duplicating another symptom patch.
-- Do not infer a systemic flaw from code shape, duplication, or architectural preference alone. Do not demand a shared abstraction or broad redesign without a concrete reachable path, violated invariant, or immediately competing semantic owner.
+- Architecture preferences, Fowler-style smells, abstraction preferences, maintainability concerns, and hypothetical evolvability are not findings by themselves. A smell may support an explanation only after source evidence proves a concrete correctness risk, a contradiction of accepted intent or a documented project rule, or material complexity this change adds unnecessarily.
 - Report a finding only when you can construct a concrete sequence that occurs during the change's intended usage, including rare but real sequences those callers actually perform. Do not report a finding whose only supporting path is a hypothetical unused execution that intended callers, the public API, or documented usage never take.
 - Do not block explicitly authorized honest containment merely because a later durable fix is possible. Do not expand user scope or turn optional broader improvements into blockers.
 - Do NOT run tests during review. The pipeline has a dedicated test step after review.
-- Analyze for bugs, risks, and code simplification opportunities.
-- "Simplification" opportunities in this pass mean reducing code complexity through non-functional refactoring (e.g. deduplication, clearer control flow). They do NOT mean removing features, changing product behavior, or stripping intentional user-facing output; a component the intent does not require is reported through the dedicated Simplification section below, never as an "auto-fix" refactor.
+- Analyze for bugs, risks, and material code simplification opportunities.
+- Non-functional simplification may only narrow changed code while preserving required behavior. It does not authorize unrelated refactoring, broad deduplication, new abstractions, future-proofing, or cleanup. Material excess belongs in the Simplification section below, never in an "auto-fix" refactor.
 - Treat security issues, performance regressions, breaking changes, insufficient error handling, and a computation that returns a wrong value, label, or set without failing as risks.
 - Do a full review pass before returning. Do not stop after the first valid finding. Continue inspecting the rest of the changed code until you have enumerated all material issues you can substantiate.
 - Report reviewed_paths as the exact set of changed files you actually read and judged in this pass. It is a coverage record, not a summary: list a changed file only if your findings verdict for it is current, and never list a file you did not examine. A file you omit is treated as unreviewed by the pipeline, never as clean.
@@ -365,11 +364,11 @@ Rules:
   - "pipeline-owned-delivery": only a finding whose sole claim is that this run's remote branch, push, PR, or CI output is not present yet.
   - "external-delivery": a pre-existing or external PR, third-party artifact, or other lifecycle requirement not owned by this run.
 
-Simplification (a dedicated pass over what the change introduced, in addition to the findings above):
-- Enumerate every component the change introduced: a new branch, acceptance or matching path, fallback, alias, mode, flag, option, a second definition of a concept the code already defines once, or a parallel copy of a rule. Judge each one against the User intent when one is stated, otherwise against the change's own stated purpose. The stated purpose sets the required scope, not the implementation.
-- For each component that is not strictly required to satisfy that intent, report a finding with severity "warning" and action "ask-user". Name the component, state that no intent requirement needs it or which requirement it exceeds, and recommend removing it as the remedy. Do not recommend hardening, validating, or documenting a component the intent does not require.
-- When a defect you reported above lives inside such a component, say so in that finding and name removal of the component as the smallest honest remedy, instead of prescribing a repair that keeps the component and hardens it.
-- Report each unrequired component once. When a component is required but a strictly narrower form satisfies the intent (for example an exact match where the change accepts several spellings), name the narrower form.
+Simplification (a targeted anti-overengineering pass over what the change introduced):
+- Inspect introduced branches, acceptance or matching paths, fallbacks, aliases, modes, flags, options, duplicate definitions of one concept, and parallel copies of a rule as candidates for excess scope. The User intent is authoritative when stated; otherwise use the change's stated purpose. Do not report a component merely because that intent does not literally name it; implementation details that reasonably support required behavior are allowed.
+- The burden of proof is on the reviewer. Report only when source evidence shows that introduced scope materially adds a concept, behavior, maintenance burden, or failure surface unnecessary for the accepted intent and can be removed or narrowed while preserving correctness and that intent. Use severity "warning" and action "ask-user"; recommend removal or the narrower form, not hardening or documenting the excess.
+- When a defect reported above lives inside materially excessive scope, say so in that finding and name removal or narrowing as the smallest honest remedy, instead of preserving and hardening the excess.
+- If the change introduces no material excess under this standard, emit no Simplification finding.
 
 Risk assessment (after listing all findings):
 - Assess source code, source-verifiable criteria, and enforceable external lifecycle requirements normally, while excluding findings scoped "pipeline-owned-delivery" from risk.
