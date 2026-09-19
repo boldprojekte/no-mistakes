@@ -850,8 +850,29 @@ func TestReviewStep_BoundedInformationalFindingStillRequiresDisposition(t *testi
 		t.Fatal(err)
 	}
 	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-		if !strings.Contains(opts.Prompt, "This is the single full-diff review pass") || !strings.Contains(opts.Prompt, "You are read-only") {
-			t.Fatalf("bounded review prompt missing single-pass read-only contract:\n%s", opts.Prompt)
+		for _, want := range []string{
+			"This is the single full-diff review pass",
+			"You are read-only",
+			"A later correction will not trigger another probabilistic review",
+			"unique stable id",
+			"evidence naming the concrete source-backed mechanism",
+			"verification with one focused command or code path",
+			"Those decisions belong exclusively to the implementation worker",
+			"Fowler-style smells",
+			"materially adds a concept, behavior, maintenance burden, or failure surface unnecessary for the accepted intent",
+			"If the change introduces no material excess under this standard, emit no Simplification finding",
+		} {
+			if !strings.Contains(opts.Prompt, want) {
+				t.Fatalf("bounded review prompt missing %q:\n%s", want, opts.Prompt)
+			}
+		}
+		for _, conflict := range []string{
+			"Enumerate every component the change introduced",
+			"For each component that is not strictly required",
+		} {
+			if strings.Contains(opts.Prompt, conflict) {
+				t.Fatalf("bounded review prompt retains mechanical scope rule %q:\n%s", conflict, opts.Prompt)
+			}
 		}
 		return &agent.Result{Output: output}, nil
 	}}
@@ -1060,8 +1081,8 @@ func TestReviewStep_DurableFixAdequacyContract(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"Do not infer a systemic flaw from code shape, duplication, or architectural preference alone.",
-		"Do not demand a shared abstraction or broad redesign without a concrete reachable path, violated invariant, or immediately competing semantic owner.",
+		"Architecture preferences, Fowler-style smells, abstraction preferences, maintainability concerns, and hypothetical evolvability are not findings by themselves.",
+		"A smell may support an explanation only after source evidence proves a concrete correctness risk, a contradiction of accepted intent or a documented project rule, or material complexity this change adds unnecessarily.",
 		"Do not block explicitly authorized honest containment merely because a later durable fix is possible.",
 		"Do not expand user scope or turn optional broader improvements into blockers.",
 	} {
@@ -2016,12 +2037,10 @@ func TestReviewStep_RereviewOffersRevertExitFromPriorRoundMachinery(t *testing.T
 	})
 }
 
-// The Simplification section is a dedicated pass that asks whether the intent
-// requires each component the change introduced, distinct from the defect pass
-// and from the refactor-only "simplification opportunities" meaning that stays
-// in place. An unrequired component is a warning whose remedy is removal and
-// whose action stays ask-user: whether extra surface is wanted is the author's
-// call. This pins the emitted contract, not model interpretation.
+// The Simplification section is a targeted anti-overengineering pass, distinct
+// from the defect pass. It reports material excess rather than mechanically
+// treating every implementation detail absent from the intent as a finding.
+// This pins the emitted contract, not model interpretation.
 func TestReviewStep_SimplificationSectionContract(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -2043,7 +2062,7 @@ func TestReviewStep_SimplificationSectionContract(t *testing.T) {
 	}
 	prompt := ag.calls[0].Prompt
 
-	sectionIdx := strings.Index(prompt, "\nSimplification (a dedicated pass over what the change introduced")
+	sectionIdx := strings.Index(prompt, "\nSimplification (a targeted anti-overengineering pass over what the change introduced")
 	if sectionIdx < 0 {
 		t.Fatalf("review prompt missing the dedicated Simplification section:\n%s", prompt)
 	}
@@ -2061,28 +2080,29 @@ func TestReviewStep_SimplificationSectionContract(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"Enumerate every component the change introduced",
-		"a second definition of a concept the code already defines once",
-		"Judge each one against the User intent when one is stated, otherwise against the change's own stated purpose",
-		`not strictly required to satisfy that intent, report a finding with severity "warning" and action "ask-user"`,
-		"recommend removing it as the remedy",
-		"Do not recommend hardening, validating, or documenting a component the intent does not require",
-		"name removal of the component as the smallest honest remedy",
-		"name the narrower form",
+		"as candidates for excess scope",
+		"The User intent is authoritative when stated; otherwise use the change's stated purpose",
+		"Do not report a component merely because that intent does not literally name it",
+		"implementation details that reasonably support required behavior are allowed",
+		"The burden of proof is on the reviewer",
+		"materially adds a concept, behavior, maintenance burden, or failure surface unnecessary for the accepted intent",
+		"removed or narrowed while preserving correctness and that intent",
+		`Use severity "warning" and action "ask-user"`,
+		"name removal or narrowing as the smallest honest remedy",
+		"emit no Simplification finding",
 	} {
 		if !strings.Contains(section, want) {
 			t.Errorf("Simplification section missing %q:\n%s", want, section)
 		}
 	}
 
-	// The refactor-only meaning of a simplification opportunity is kept and
-	// now points at the section instead of contradicting it: an unrequired
-	// component is never an auto-fix refactor.
+	// Non-functional simplification stays inside the changed area and cannot
+	// bootstrap broader cleanup or another abstraction project.
 	for _, want := range []string{
-		"Analyze for bugs, risks, and code simplification opportunities.",
-		"non-functional refactoring (e.g. deduplication, clearer control flow)",
-		"do NOT mean removing features, changing product behavior, or stripping intentional user-facing output",
-		`reported through the dedicated Simplification section below, never as an "auto-fix" refactor`,
+		"Analyze for bugs, risks, and material code simplification opportunities.",
+		"Non-functional simplification may only narrow changed code while preserving required behavior",
+		"does not authorize unrelated refactoring, broad deduplication, new abstractions, future-proofing, or cleanup",
+		`Material excess belongs in the Simplification section below, never in an "auto-fix" refactor`,
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("review prompt lost the refactor-only simplification meaning %q:\n%s", want, prompt)
@@ -2095,6 +2115,10 @@ func TestReviewStep_SimplificationSectionContract(t *testing.T) {
 		"Report a finding only when you can construct a concrete sequence that occurs during the change's intended usage",
 		"Do a full review pass before returning",
 		"Classify by the remedy, not only by the topic.",
+		"Fowler-style smells",
+		"are not findings by themselves",
+		"A smell may support an explanation only after source evidence proves",
+		"a contradiction of accepted intent or a documented project rule",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("review prompt dropped an existing obligation %q:\n%s", want, prompt)
@@ -2105,6 +2129,8 @@ func TestReviewStep_SimplificationSectionContract(t *testing.T) {
 		"second reviewer",
 		"rewrite the change",
 		"delete the feature",
+		"enumerate every component the change introduced",
+		"for each component that is not strictly required",
 	} {
 		if strings.Contains(strings.ToLower(prompt), overreach) {
 			t.Errorf("review prompt broadened past the Simplification section with %q:\n%s", overreach, prompt)
