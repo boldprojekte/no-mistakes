@@ -24,6 +24,9 @@ func (m Model) awaitingActionState() (showSelectionActions bool, allowFix bool, 
 		return false, false, 0, 0
 	}
 	totalCount = len(items)
+	if m.boundedReviewNeedsAuthority(step.StepName) {
+		return false, false, 0, totalCount
+	}
 	if m.boundedReviewNeedsDisposition(step.StepName) {
 		selectedCount = len(m.findingDispositions[step.StepName])
 		return true, m.boundedReviewDispositionsComplete(step.StepName), selectedCount, totalCount
@@ -34,6 +37,22 @@ func (m Model) awaitingActionState() (showSelectionActions bool, allowFix bool, 
 	}
 	selectedCount = len(selected)
 	return true, selectedCount > 0, selectedCount, totalCount
+}
+
+func (m Model) boundedReviewNeedsAuthority(step types.StepName) bool {
+	if step != types.StepReview {
+		return false
+	}
+	parsed, err := parseFindings(m.stepFindings[step])
+	if err != nil || parsed == nil || parsed.ReviewStrategy != "bounded" {
+		return false
+	}
+	for _, item := range parsed.Items {
+		if item.Disposition == types.FindingDispositionEscalate {
+			return true
+		}
+	}
+	return false
 }
 
 // boundedReviewNeedsDisposition identifies the initial bounded Review gate.

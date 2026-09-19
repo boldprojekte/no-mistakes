@@ -213,12 +213,12 @@ func appendRightLabel(line, label string, width int) string {
 // Per DESIGN.md: "Sits below the pipeline box, above findings/diff"
 // showDiff controls whether the 'd' key label says "findings" (to toggle back) or "diff".
 // Selection actions are hidden in diff mode since they don't apply.
-func renderActionBar(steps []ipc.StepResultInfo, showSelectionActions bool, allowFix bool, showDiff bool, selectedCount int, totalCount int, confirmAbort bool, hasDiff bool, approvalReady bool, retryAvailable bool, boundedDisposition bool) string {
+func renderActionBar(steps []ipc.StepResultInfo, showSelectionActions bool, allowFix bool, showDiff bool, selectedCount int, totalCount int, confirmAbort bool, hasDiff bool, approvalReady bool, retryAvailable bool, boundedDisposition bool, boundedAuthority bool) string {
 	step := awaitingStep(steps)
 	if step == nil {
 		if retryAvailable {
 			promptStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiYellow))
-			return promptStyle.Render("Review state unavailable:") + "\n" + renderApprovalActions(false, false, false, 0, 0, confirmAbort, false, false, true, false)
+			return promptStyle.Render("Review state unavailable:") + "\n" + renderApprovalActions(false, false, false, 0, 0, confirmAbort, false, false, true, false, false)
 		}
 		return ""
 	}
@@ -229,15 +229,18 @@ func renderActionBar(steps []ipc.StepResultInfo, showSelectionActions bool, allo
 	if step.Status == types.StepStatusFixReview {
 		prompt = fmt.Sprintf("%s - review fix:", stepLabel(step.StepName))
 	}
+	if boundedAuthority {
+		prompt = fmt.Sprintf("%s awaiting responsible authority:", stepLabel(step.StepName))
+	}
 	b.WriteString(promptStyle.Render(prompt))
 	b.WriteString("\n")
 	// Hide selection actions in diff mode since toggle/A/N keys don't work there.
 	effectiveSelection := showSelectionActions && !showDiff
-	b.WriteString(renderApprovalActions(effectiveSelection, allowFix, showDiff, selectedCount, totalCount, confirmAbort, hasDiff, approvalReady, retryAvailable, boundedDisposition))
+	b.WriteString(renderApprovalActions(effectiveSelection, allowFix, showDiff, selectedCount, totalCount, confirmAbort, hasDiff, approvalReady, retryAvailable, boundedDisposition, boundedAuthority))
 	return b.String()
 }
 
-func renderApprovalActions(showSelectionActions bool, allowFix bool, showDiff bool, selectedCount int, totalCount int, confirmAbort bool, hasDiff bool, approvalReady bool, retryAvailable bool, boundedDisposition bool) string {
+func renderApprovalActions(showSelectionActions bool, allowFix bool, showDiff bool, selectedCount int, totalCount int, confirmAbort bool, hasDiff bool, approvalReady bool, retryAvailable bool, boundedDisposition bool, boundedAuthority bool) string {
 	boldKey := lipgloss.NewStyle().Bold(true)
 	renderAction := func(key, label string) string {
 		return boldKey.Render(key) + " " + label
@@ -257,7 +260,9 @@ func renderApprovalActions(showSelectionActions bool, allowFix bool, showDiff bo
 	}
 
 	var primary []string
-	if boundedDisposition {
+	if boundedAuthority {
+		primary = append(primary, renderAction("a", "approve authority decision"), renderAction("s", "skip"))
+	} else if boundedDisposition {
 		if allowFix {
 			primary = append(primary, renderAction("f", fmt.Sprintf("submit dispositions (%d/%d)", selectedCount, totalCount)))
 		} else {
@@ -266,14 +271,14 @@ func renderApprovalActions(showSelectionActions bool, allowFix bool, showDiff bo
 	} else {
 		primary = append(primary, renderAction("a", "approve"))
 	}
-	if allowFix && !boundedDisposition {
+	if allowFix && !boundedDisposition && !boundedAuthority {
 		fixLabel := "fix"
 		if selectedCount > 0 && selectedCount < totalCount {
 			fixLabel = fmt.Sprintf("fix (%d/%d)", selectedCount, totalCount)
 		}
 		primary = append(primary, renderAction("f", fixLabel))
 	}
-	if !boundedDisposition {
+	if !boundedDisposition && !boundedAuthority {
 		primary = append(primary, renderAction("s", "skip"))
 	}
 	primary = append(primary, renderAction("x", abortLabel))

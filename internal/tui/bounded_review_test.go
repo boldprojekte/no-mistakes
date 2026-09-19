@@ -10,6 +10,8 @@ import (
 
 const boundedReviewTUIFindings = `{"review_strategy":"bounded","findings":[{"id":"review-1","severity":"error","description":"confirmed defect","evidence":"trace one","verification":"run test one","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"unsupported claim","evidence":"trace two","verification":"inspect caller","action":"auto-fix"}],"summary":"two findings"}`
 
+const boundedReviewAuthorityFindings = `{"review_strategy":"bounded","findings":[{"id":"review-1","severity":"error","description":"confirmed defect","evidence":"trace one","verification":"run test one","action":"auto-fix","disposition":"confirmed-fix","disposition_reason":"reproduced"},{"id":"review-2","severity":"warning","description":"security policy decision","evidence":"trace two","verification":"responsible authority decides","action":"ask-user","disposition":"escalate","disposition_reason":"requires security authority"}],"summary":"authority required"}`
+
 func newBoundedReviewTUIModel(t *testing.T) Model {
 	t.Helper()
 	run := testRun()
@@ -96,5 +98,40 @@ func TestBoundedReviewTUIRejectsIncompleteAndYoloResponses(t *testing.T) {
 	}
 	if strings.Contains(view, "a approve") || strings.Contains(view, "s skip") {
 		t.Fatalf("bounded Review exposed bypass actions:\n%s", view)
+	}
+}
+
+func TestBoundedReviewEscalationStopsYoloAndShowsAuthorityActions(t *testing.T) {
+	sock, client, snapshot := captureRespond(t)
+	run := testRun()
+	run.Steps[0].Status = types.StepStatusFixReview
+	run.Steps[0].FindingsJSON = ptr(boundedReviewAuthorityFindings)
+	m := NewModel(sock, client, run)
+	m.yoloMode = true
+	m.stepDiffLoaded[types.StepReview] = true
+	m.width = 120
+	m.height = 50
+
+	if cmd := m.maybeAutoApproveCmd(); cmd != nil {
+		t.Fatal("yolo approved a bounded Review escalation")
+	}
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "Review awaiting responsible authority:") || !strings.Contains(view, "a approve authority decision") {
+		t.Fatalf("responsible-authority actions missing:\n%s", view)
+	}
+	if strings.Contains(view, "f fix") || strings.Contains(view, "v disposition") {
+		t.Fatalf("authority gate exposed worker correction controls:\n%s", view)
+	}
+
+	cmd := m.respondCmd(types.ActionApprove)
+	if cmd == nil {
+		t.Fatal("explicit responsible-authority approval was unavailable")
+	}
+	if msg := cmd(); msg != nil {
+		t.Fatalf("approve returned %#v", msg)
+	}
+	calls := snapshot()
+	if len(calls) != 1 || calls[0].Action != types.ActionApprove {
+		t.Fatalf("authority response calls = %+v", calls)
 	}
 }

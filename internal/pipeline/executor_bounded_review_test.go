@@ -134,6 +134,9 @@ func TestExecutor_BoundedReviewRecoveryRetainsDispositionedCorrection(t *testing
 	release := make(chan struct{})
 	var selected, deferred types.Findings
 	review := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		if got := sctx.Config.Review.Strategy; got != config.ReviewStrategyBounded {
+			t.Fatalf("recovered Review strategy = %q, want persisted bounded strategy", got)
+		}
 		var err error
 		selected, err = types.ParseFindingsJSON(sctx.PreviousFindings)
 		if err != nil {
@@ -147,7 +150,9 @@ func TestExecutor_BoundedReviewRecoveryRetainsDispositionedCorrection(t *testing
 		<-release
 		return &StepOutcome{Findings: mergeFindingsJSON(sctx.PreviousFindings, sctx.DeferredFindings), ReviewApprovedHeadSHA: recoveredRun.HeadSHA}, nil
 	}}
-	exec := NewExecutor(database, paths, &config.Config{Review: config.Review{Strategy: config.ReviewStrategyBounded}}, nil, []Step{review}, nil)
+	// Recovery must use the strategy persisted with the parked findings, not a
+	// live config value that may have changed while the daemon was down.
+	exec := NewExecutor(database, paths, &config.Config{Review: config.Review{Strategy: config.ReviewStrategyIterative}}, nil, []Step{review}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	workDir := t.TempDir()
@@ -192,5 +197,50 @@ func TestExecutor_BoundedReviewRecoveryRetainsDispositionedCorrection(t *testing
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("recovered executor did not stop")
+	}
+}
+
+func TestExecutor_IterativeReviewRecoveryIgnoresNewBoundedConfig(t *testing.T) {
+	database, paths, run, repo := setupTest(t)
+	findings := `{"findings":[{"id":"review-1","severity":"error","description":"bug","action":"auto-fix"}],"summary":"one"}`
+	_, recoveredRun := seedRecoveredReviewGate(t, database, run, findings, types.StepStatusAwaitingApproval, "")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	review := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		if got := sctx.Config.Review.Strategy; got != config.ReviewStrategyIterative {
+			t.Fatalf("recovered Review strategy = %q, want persisted iterative strategy", got)
+		}
+		close(started)
+		<-release
+		return &StepOutcome{}, nil
+	}}
+	exec := NewExecutor(database, paths, &config.Config{Review: config.Review{Strategy: config.ReviewStrategyBounded}}, nil, []Step{review}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- exec.Resume(ctx, recoveredRun, repo, t.TempDir()) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"})
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("recovered iterative gate never accepted ordinary selection: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovered iterative correction did not start")
+	}
+
+	cancel()
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovered iterative executor did not stop")
 	}
 }

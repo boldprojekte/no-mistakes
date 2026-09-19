@@ -100,7 +100,7 @@ Bounded Review has one owner per phase:
 5. Review records the corrected head and never launches a rereviewer or another correction round. Resolved findings become `no-op`; escalated findings remain `ask-user` until authority responds.
 6. The normal Test, Document, and Lint steps, not another probabilistic reviewer, own post-correction verification. Repository-owned live UI/E2E commands remain Test surfaces and their evidence is recorded normally. Push, PR, and CI continue through the existing custody and publication machinery; review-bot findings in CI remain a separate PR-level signal.
 
-`auto_fix.review` is ignored in bounded mode. AXI status includes `review_cycle` with the review and correction counts, disposition totals, next owner, and `full_review_loop_permitted: false`, so recovery never has to infer whether another probabilistic pass is allowed.
+`auto_fix.review` is ignored in bounded mode. AXI status includes `review_cycle` with the review and correction counts, disposition totals, next owner, and `full_review_loop_permitted: false`, so recovery never has to infer whether another probabilistic pass is allowed. The parked findings persist the strategy that owns the gate; after a daemon restart, recovery keeps that strategy even if configuration changed while the run was parked.
 
 **Behavior:**
 

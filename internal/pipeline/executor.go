@@ -395,6 +395,7 @@ type stepExecutionState struct {
 	fixing                 bool
 	previousFindings       string
 	deferredFindings       string
+	reviewStrategy         string
 	roundNum               int
 	autoFixAttempts        int
 	executionMS            int64
@@ -442,6 +443,20 @@ type recoveredGate struct {
 	lastRoundID            string
 	reviewedHeadSHA        string
 	selectedOutstandingIDs []string
+	reviewStrategy         string
+}
+
+func configWithReviewStrategy(cfg *config.Config, strategy string) *config.Config {
+	if strategy == "" {
+		return cfg
+	}
+	if cfg == nil {
+		return &config.Config{Review: config.Review{Strategy: strategy}}
+	}
+	cloned := *cfg
+	cloned.Review = cfg.Review
+	cloned.Review.Strategy = strategy
+	return &cloned
 }
 
 func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
@@ -468,6 +483,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if err != nil {
 		return err
 	}
+	recoveredConfig := configWithReviewStrategy(e.config, gate.reviewStrategy)
 	logDir := e.paths.RunLogDir(run.ID)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
@@ -504,7 +520,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		Repo:         repo,
 		WorkDir:      workDir,
 		GateDir:      e.paths.RepoDir(repo.ID),
-		Config:       e.config,
+		Config:       recoveredConfig,
 		ForgeContext: e.forge,
 		DB:           e.db,
 		StepResultID: gate.stepResult.ID,
@@ -608,7 +624,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
 	case types.ActionFix:
 		telemetry.Track("fix", e.fixTelemetryFields("user", gate.step.Name(), selectedFindingCount(gate.findings, response.findingIDs), 0))
-		boundedReview := gate.step.Name() == types.StepReview && e.config != nil && e.config.Review.Strategy == config.ReviewStrategyBounded
+		boundedReview := gate.step.Name() == types.StepReview && gate.reviewStrategy == config.ReviewStrategyBounded
 		adjudicatedFindings := gate.findings
 		if boundedReview {
 			var dispositionErr error
@@ -664,6 +680,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			fixing:                 true,
 			previousFindings:       merged,
 			deferredFindings:       removeMatchingFindingsJSON(adjudicatedFindings, selected),
+			reviewStrategy:         gate.reviewStrategy,
 			outstandingFindings:    outstandingFindings,
 			selectedOutstandingIDs: selectedOutstandingIDs,
 			roundNum:               gate.round,
@@ -743,6 +760,20 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 				autoFixes:              autoFixes,
 				lastRoundID:            latest.ID,
 				selectedOutstandingIDs: retainFindingIDsByIdentity(*result.FindingsJSON, selectedOutstandingIDs, identity),
+			}
+			if result.StepName == types.StepReview {
+				findings, parseErr := types.ParseFindingsJSON(*result.FindingsJSON)
+				if parseErr != nil {
+					return nil, fmt.Errorf("recovered Review findings are invalid: %w", parseErr)
+				}
+				switch findings.ReviewStrategy {
+				case "", config.ReviewStrategyIterative:
+					gate.reviewStrategy = config.ReviewStrategyIterative
+				case config.ReviewStrategyBounded:
+					gate.reviewStrategy = config.ReviewStrategyBounded
+				default:
+					return nil, fmt.Errorf("recovered Review strategy %q is invalid", findings.ReviewStrategy)
+				}
 			}
 			if latest.ReviewedHeadSHA != nil {
 				gate.reviewedHeadSHA = *latest.ReviewedHeadSHA
@@ -984,7 +1015,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// auto_fix.review (the automatic-round budget) and the human/agent gate,
 	// same as upstream. Repeated user selections remain operator/driver-owned,
 	// rather than receiving a separate code-level round cap. Unused by every other step.
-	boundedReview := stepName == types.StepReview && e.config != nil && e.config.Review.Strategy == config.ReviewStrategyBounded
+	stepConfig := configWithReviewStrategy(e.config, state.reviewStrategy)
+	boundedReview := stepName == types.StepReview && stepConfig != nil && stepConfig.Review.Strategy == config.ReviewStrategyBounded
 	carryFindings := stepName == types.StepReview && !boundedReview
 	outstandingFindings := ""
 	var pendingVerificationIDs []string
@@ -1039,7 +1071,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		WorkDir:          workDir,
 		GateDir:          e.paths.RepoDir(repo.ID),
 		Agent:            stepAgent,
-		Config:           e.config,
+		Config:           stepConfig,
 		ForgeContext:     e.forge,
 		DB:               e.db,
 		StepResultID:     sr.ID,

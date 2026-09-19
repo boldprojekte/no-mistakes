@@ -51,7 +51,8 @@ func (m Model) View() string {
 	approvalReady := m.approvalReady(stepAwaiting)
 	retryAvailable := m.reviewRetryAvailable()
 	boundedDisposition := stepAwaiting != nil && m.boundedReviewNeedsDisposition(stepAwaiting.StepName)
-	actionBar := renderActionBar(m.steps, showSelectionActions, allowFix, m.showDiff, selectedCount, totalCount, m.confirmAbort, hasDiff, approvalReady, retryAvailable, boundedDisposition)
+	boundedAuthority := stepAwaiting != nil && m.boundedReviewNeedsAuthority(stepAwaiting.StepName)
+	actionBar := renderActionBar(m.steps, showSelectionActions, allowFix, m.showDiff, selectedCount, totalCount, m.confirmAbort, hasDiff, approvalReady, retryAvailable, boundedDisposition, boundedAuthority)
 	if stepAwaiting != nil && m.stepDiffTruncated[stepAwaiting.StepName] {
 		warning := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiYellow)).
 			Render("⚠ Diff truncated at 512 KiB. Approval applies to the full diff.")
