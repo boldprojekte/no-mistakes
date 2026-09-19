@@ -40,6 +40,7 @@ type approvalResponse struct {
 	findingIDs     []string
 	instructions   map[string]string
 	addedFindings  []types.Finding
+	dispositions   map[string]types.FindingDisposition
 	approvalReason string
 }
 
@@ -66,6 +67,7 @@ type Executor struct {
 	waiting                bool                  // true when blocked on approval
 	waitingStep            types.StepName        // which step is currently awaiting approval
 	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
+	waitingFindings        string                // exact gate report used to validate bounded adjudication
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -164,6 +166,12 @@ func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, fin
 // findings on a fix action before the fix agent runs. approvalReason is only
 // accepted for Test approval and is never passed to a fix agent.
 func (e *Executor) RespondWithOverrides(step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string) error {
+	return e.RespondWithAdjudication(step, action, findingIDs, instructions, addedFindings, nil, approvalReason)
+}
+
+// RespondWithAdjudication additionally carries the implementation worker's
+// evidence-backed decision for every finding in a bounded review.
+func (e *Executor) RespondWithAdjudication(step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding, dispositions map[string]types.FindingDisposition, approvalReason string) error {
 	if approvalReason != "" && (step != types.StepTest || action != types.ActionApprove) {
 		return fmt.Errorf("an approval reason applies only to Test approval")
 	}
@@ -189,7 +197,12 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		e.mu.Unlock()
 		return errors.New(refusal)
 	}
+	if err := validateBoundedReviewResponse(step, action, e.waitingFindings, findingIDs, addedFindings, dispositions); err != nil {
+		e.mu.Unlock()
+		return err
+	}
 	e.waiting = false
+	e.waitingFindings = ""
 	e.mu.Unlock()
 
 	e.approvalCh <- approvalResponse{
@@ -197,9 +210,67 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		findingIDs:     findingIDs,
 		instructions:   instructions,
 		addedFindings:  addedFindings,
+		dispositions:   dispositions,
 		approvalReason: approvalReason,
 	}
 	return nil
+}
+
+func validateBoundedReviewResponse(step types.StepName, action types.ApprovalAction, raw string, findingIDs []string, addedFindings []types.Finding, dispositions map[string]types.FindingDisposition) error {
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil || findings.ReviewStrategy != config.ReviewStrategyBounded {
+		if len(dispositions) > 0 {
+			return fmt.Errorf("finding dispositions apply only to a bounded Review gate")
+		}
+		return nil
+	}
+	alreadyAdjudicated := len(findings.Items) > 0
+	for _, item := range findings.Items {
+		if item.Disposition == "" {
+			alreadyAdjudicated = false
+			break
+		}
+	}
+	if alreadyAdjudicated {
+		if action == types.ActionFix {
+			return fmt.Errorf("bounded Review correction is complete; no full-review or correction loop is permitted")
+		}
+		if len(dispositions) > 0 {
+			return fmt.Errorf("bounded Review findings are already dispositioned")
+		}
+		return nil
+	}
+	if step != types.StepReview || action != types.ActionFix {
+		return fmt.Errorf("bounded Review requires one worker adjudication response with --action fix and a disposition for every finding")
+	}
+	if len(addedFindings) > 0 {
+		return fmt.Errorf("bounded Review adjudication cannot add findings; disposition the independent reviewer report only")
+	}
+	_, fixIDs, err := applyFindingDispositionsJSON(raw, dispositions)
+	if err != nil {
+		return err
+	}
+	if !sameStringSet(findingIDs, fixIDs) {
+		return fmt.Errorf("--findings must list exactly the confirmed-fix dispositions (want %s)", strings.Join(fixIDs, ","))
+	}
+	return nil
+}
+
+func sameStringSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	seen := make(map[string]int, len(left))
+	for _, value := range left {
+		seen[value]++
+	}
+	for _, value := range right {
+		if seen[value] == 0 {
+			return false
+		}
+		seen[value]--
+	}
+	return true
 }
 
 // Execute runs the pipeline steps sequentially for a given run.
@@ -324,6 +395,7 @@ type stepExecutionState struct {
 	fixing                 bool
 	previousFindings       string
 	deferredFindings       string
+	reviewStrategy         string
 	roundNum               int
 	autoFixAttempts        int
 	executionMS            int64
@@ -371,6 +443,20 @@ type recoveredGate struct {
 	lastRoundID            string
 	reviewedHeadSHA        string
 	selectedOutstandingIDs []string
+	reviewStrategy         string
+}
+
+func configWithReviewStrategy(cfg *config.Config, strategy string) *config.Config {
+	if strategy == "" {
+		return cfg
+	}
+	if cfg == nil {
+		return &config.Config{Review: config.Review{Strategy: strategy}}
+	}
+	cloned := *cfg
+	cloned.Review = cfg.Review
+	cloned.Review.Strategy = strategy
+	return &cloned
 }
 
 func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
@@ -397,6 +483,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if err != nil {
 		return err
 	}
+	recoveredConfig := configWithReviewStrategy(e.config, gate.reviewStrategy)
 	logDir := e.paths.RunLogDir(run.ID)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
@@ -433,7 +520,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		Repo:         repo,
 		WorkDir:      workDir,
 		GateDir:      e.paths.RepoDir(repo.ID),
-		Config:       e.config,
+		Config:       recoveredConfig,
 		ForgeContext: e.forge,
 		DB:           e.db,
 		StepResultID: gate.stepResult.ID,
@@ -470,6 +557,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
 	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
+	e.waitingFindings = gate.findings
 	e.mu.Unlock()
 	e.emitStepEventWithFindingsAndError(
 		ipc.EventStepCompleted,
@@ -536,12 +624,24 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
 	case types.ActionFix:
 		telemetry.Track("fix", e.fixTelemetryFields("user", gate.step.Name(), selectedFindingCount(gate.findings, response.findingIDs), 0))
-		selected := filterFindingsJSON(gate.findings, response.findingIDs)
+		boundedReview := gate.step.Name() == types.StepReview && gate.reviewStrategy == config.ReviewStrategyBounded
+		adjudicatedFindings := gate.findings
+		if boundedReview {
+			var dispositionErr error
+			adjudicatedFindings, _, dispositionErr = applyFindingDispositionsJSON(gate.findings, response.dispositions)
+			if dispositionErr != nil {
+				return e.failRun(run, repo, fmt.Errorf("record bounded Review dispositions: %w", dispositionErr), ctx)
+			}
+			if dbErr := e.db.SetStepFindings(gate.stepResult.ID, adjudicatedFindings); dbErr != nil {
+				return e.failRun(run, repo, fmt.Errorf("persist bounded Review dispositions: %w", dbErr), ctx)
+			}
+		}
+		selected := filterFindingsJSON(adjudicatedFindings, response.findingIDs)
 		merged := mergeUserOverridesJSON(selected, response.instructions, response.addedFindings)
 		selectedForPersistence := merged
-		outstandingFindings := gate.findings
+		outstandingFindings := adjudicatedFindings
 		selectedOutstandingIDs := gate.selectedOutstandingIDs
-		if gate.step.Name() == types.StepReview {
+		if gate.step.Name() == types.StepReview && !boundedReview {
 			// APPEND-ONLY: mirror the live path (see the ActionFix case in
 			// executeStep) so a resumed fix round carries the same merged
 			// outstanding set and post-remap selected IDs as an in-process
@@ -556,9 +656,15 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		}
 		if gate.lastRoundID != "" {
 			allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, selectedForPersistence)
-			if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
+			idsJSON := marshalFindingIDs(allSelectedIDs)
+			if boundedReview && idsJSON == "" {
+				idsJSON = db.DeclinedSelectionJSON
+			}
+			if idsJSON != "" {
 				var userFindingsJSON *string
-				if merged != "" && merged != selected {
+				if boundedReview {
+					userFindingsJSON = &adjudicatedFindings
+				} else if merged != "" && merged != selected {
 					userFindingsJSON = &selectedForPersistence
 				}
 				if dbErr := e.db.SetStepRoundUserDecision(gate.lastRoundID, &idsJSON, db.RoundSelectionSourceUser, userFindingsJSON); dbErr != nil {
@@ -573,7 +679,8 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		skipRemaining, restartFrom, err := e.executeStep(ctx, gate.step, gate.stepResult, run, repo, workDir, logDir, stepExecutionState{
 			fixing:                 true,
 			previousFindings:       merged,
-			deferredFindings:       removeMatchingFindingsJSON(gate.findings, selected),
+			deferredFindings:       removeMatchingFindingsJSON(adjudicatedFindings, selected),
+			reviewStrategy:         gate.reviewStrategy,
 			outstandingFindings:    outstandingFindings,
 			selectedOutstandingIDs: selectedOutstandingIDs,
 			roundNum:               gate.round,
@@ -653,6 +760,20 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 				autoFixes:              autoFixes,
 				lastRoundID:            latest.ID,
 				selectedOutstandingIDs: retainFindingIDsByIdentity(*result.FindingsJSON, selectedOutstandingIDs, identity),
+			}
+			if result.StepName == types.StepReview {
+				findings, parseErr := types.ParseFindingsJSON(*result.FindingsJSON)
+				if parseErr != nil {
+					return nil, fmt.Errorf("recovered Review findings are invalid: %w", parseErr)
+				}
+				switch findings.ReviewStrategy {
+				case "", config.ReviewStrategyIterative:
+					gate.reviewStrategy = config.ReviewStrategyIterative
+				case config.ReviewStrategyBounded:
+					gate.reviewStrategy = config.ReviewStrategyBounded
+				default:
+					return nil, fmt.Errorf("recovered Review strategy %q is invalid", findings.ReviewStrategy)
+				}
 			}
 			if latest.ReviewedHeadSHA != nil {
 				gate.reviewedHeadSHA = *latest.ReviewedHeadSHA
@@ -894,7 +1015,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// auto_fix.review (the automatic-round budget) and the human/agent gate,
 	// same as upstream. Repeated user selections remain operator/driver-owned,
 	// rather than receiving a separate code-level round cap. Unused by every other step.
-	carryFindings := stepName == types.StepReview
+	stepConfig := configWithReviewStrategy(e.config, state.reviewStrategy)
+	boundedReview := stepName == types.StepReview && stepConfig != nil && stepConfig.Review.Strategy == config.ReviewStrategyBounded
+	carryFindings := stepName == types.StepReview && !boundedReview
 	outstandingFindings := ""
 	var pendingVerificationIDs []string
 	selectedOutstandingIDs := state.selectedOutstandingIDs
@@ -948,7 +1071,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		WorkDir:          workDir,
 		GateDir:          e.paths.RepoDir(repo.ID),
 		Agent:            stepAgent,
-		Config:           e.config,
+		Config:           stepConfig,
 		ForgeContext:     e.forge,
 		DB:               e.db,
 		StepResultID:     sr.ID,
@@ -1091,7 +1214,7 @@ rounds:
 		// Only auto-fix findings whose action is "auto-fix".
 		// This runs before the NeedsApproval check so that all severity
 		// levels (including "info") get a chance at automatic fixing.
-		if outcome.AutoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit {
+		if outcome.AutoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit && !boundedReview {
 			fixableFindings := autoFixableFindingsJSON(roundFindings)
 			if carryFindings {
 				fixableFindings = remapFindingIDsJSON(effectiveFindings, fixableFindings)
@@ -1159,6 +1282,7 @@ rounds:
 			e.waiting = true
 			e.waitingStep = stepName
 			e.waitingApprovalRefusal = approvalRefusal(stepName, effectiveFindings)
+			e.waitingFindings = effectiveFindings
 			e.mu.Unlock()
 
 			// Parking starts before the gate becomes observable. This includes the
@@ -1174,6 +1298,7 @@ rounds:
 				e.mu.Lock()
 				e.waiting = false
 				e.waitingStep = ""
+				e.waitingFindings = ""
 				e.mu.Unlock()
 				return false, "", fmt.Errorf("persist %s approval gate: %w", stepName, dbErr)
 			}
@@ -1238,6 +1363,17 @@ rounds:
 
 			case types.ActionFix:
 				telemetry.Track("fix", e.fixTelemetryFields("user", stepName, selectedFindingCount(effectiveFindings, response.findingIDs), 0))
+				adjudicatedFindings := effectiveFindings
+				if boundedReview {
+					var dispositionErr error
+					adjudicatedFindings, _, dispositionErr = applyFindingDispositionsJSON(effectiveFindings, response.dispositions)
+					if dispositionErr != nil {
+						return false, "", fmt.Errorf("record bounded Review dispositions: %w", dispositionErr)
+					}
+					if dbErr := e.db.SetStepFindings(sr.ID, adjudicatedFindings); dbErr != nil {
+						return false, "", fmt.Errorf("persist bounded Review dispositions: %w", dbErr)
+					}
+				}
 				// Fix - mark step as fixing, resume execution timer, re-execute.
 				phaseStart = time.Now()
 				selectedCount := selectedFindingCount(effectiveFindings, response.findingIDs)
@@ -1246,10 +1382,10 @@ rounds:
 					slog.Warn("failed to start step fix round in db", "step", stepName, "error", dbErr)
 				}
 				sctx.Fixing = true
-				selectedFindings := filterFindingsJSON(effectiveFindings, response.findingIDs)
+				selectedFindings := filterFindingsJSON(adjudicatedFindings, response.findingIDs)
 				mergedFindings := mergeUserOverridesJSON(selectedFindings, response.instructions, response.addedFindings)
 				sctx.PreviousFindings = mergedFindings
-				sctx.DeferredFindings = removeMatchingFindingsJSON(effectiveFindings, selectedFindings)
+				sctx.DeferredFindings = removeMatchingFindingsJSON(adjudicatedFindings, selectedFindings)
 				selectedForPersistence := mergedFindings
 				if carryFindings {
 					// APPEND-ONLY: the selection is additionally handed to the fixer
@@ -1267,9 +1403,15 @@ rounds:
 				nextTrigger = "auto_fix"
 				if currentRoundID != "" {
 					allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, selectedForPersistence)
-					if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
+					idsJSON := marshalFindingIDs(allSelectedIDs)
+					if boundedReview && idsJSON == "" {
+						idsJSON = db.DeclinedSelectionJSON
+					}
+					if idsJSON != "" {
 						var userFindingsJSON *string
-						if mergedFindings != "" && mergedFindings != selectedFindings {
+						if boundedReview {
+							userFindingsJSON = &adjudicatedFindings
+						} else if mergedFindings != "" && mergedFindings != selectedFindings {
 							userFindingsJSON = &selectedForPersistence
 						}
 						if dbErr := e.db.SetStepRoundUserDecision(currentRoundID, &idsJSON, db.RoundSelectionSourceUser, userFindingsJSON); dbErr != nil {
@@ -1534,6 +1676,7 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 		e.mu.Lock()
 		e.waiting = false
 		e.waitingStep = ""
+		e.waitingFindings = ""
 		e.mu.Unlock()
 		// Drain any stale response that arrived after context cancellation or
 		// raced with an external reconciliation.
@@ -1595,6 +1738,7 @@ func (e *Executor) claimGateReconciliation() bool {
 	}
 	e.waiting = false
 	e.waitingStep = ""
+	e.waitingFindings = ""
 	return true
 }
 

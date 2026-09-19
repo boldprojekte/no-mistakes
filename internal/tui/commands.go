@@ -93,9 +93,10 @@ func (m Model) rerunCmd(requestID uint64) tea.Cmd {
 // whose findings are actionable gets a fix request (all findings selected),
 // while a gate with only non-actionable (no-op) findings - or none at all - is
 // approved as-is. A step is fixed at most once; the fix re-runs the step and
-// re-enters the gate as a fix_review, which yolo then approves so the pipeline
-// runs to completion without looping. Each terminal action fires once so
-// duplicate events while waiting for the round-trip don't resend it.
+// re-enters the gate as a fix_review, which yolo then approves unless the
+// bounded worker disposition requires responsible authority. Each terminal
+// action fires once so duplicate events while waiting for the round-trip don't
+// resend it.
 func (m Model) maybeAutoApproveCmd() tea.Cmd {
 	if !m.yoloMode {
 		return nil
@@ -104,10 +105,16 @@ func (m Model) maybeAutoApproveCmd() tea.Cmd {
 	if step == nil || m.yoloApproved[step.StepName] {
 		return nil
 	}
+	if m.boundedReviewNeedsAuthority(step.StepName) {
+		return nil
+	}
 	if pipeline.HasProtectedPathRefusal(m.stepFindings[step.StepName]) || pipeline.HasUnvalidatedWorkRefusal(m.stepFindings[step.StepName]) {
 		return nil
 	}
 	if !m.approvalReady(step) {
+		return nil
+	}
+	if m.boundedReviewNeedsDisposition(step.StepName) {
 		return nil
 	}
 	if step.Status != types.StepStatusFixReview && !m.yoloFixed[step.StepName] && m.stepHasActionableFindings(step.StepName) {
@@ -127,11 +134,29 @@ func (m Model) respondCmd(action types.ApprovalAction) tea.Cmd {
 	if !m.approvalReady(step) {
 		return nil
 	}
-	if action == types.ActionFix {
-		ids := m.selectedFindingIDs(step.StepName)
-		userAdded := m.selectedUserAddedFindings(step.StepName)
-		if len(ids) == 0 && len(userAdded) == 0 && len(m.findingItems(step.StepName)) > 0 {
+	boundedDisposition := m.boundedReviewNeedsDisposition(step.StepName)
+	var boundedDecisions map[string]types.FindingDisposition
+	var boundedFixIDs []string
+	if boundedDisposition {
+		if action != types.ActionFix || !m.boundedReviewDispositionsComplete(step.StepName) {
 			return nil
+		}
+		boundedDecisions = make(map[string]types.FindingDisposition, len(m.findingDispositions[step.StepName]))
+		for _, item := range m.agentFindingItems(step.StepName) {
+			decision := m.findingDispositions[step.StepName][item.ID]
+			boundedDecisions[item.ID] = decision
+			if decision.Decision == types.FindingDispositionFix {
+				boundedFixIDs = append(boundedFixIDs, item.ID)
+			}
+		}
+	}
+	if action == types.ActionFix {
+		if !boundedDisposition {
+			ids := m.selectedFindingIDs(step.StepName)
+			userAdded := m.selectedUserAddedFindings(step.StepName)
+			if len(ids) == 0 && len(userAdded) == 0 && len(m.findingItems(step.StepName)) > 0 {
+				return nil
+			}
 		}
 	}
 	return func() tea.Msg {
@@ -141,22 +166,29 @@ func (m Model) respondCmd(action types.ApprovalAction) tea.Cmd {
 			Action: action,
 		}
 		if action == types.ActionFix {
-			ids := m.selectedFindingIDs(step.StepName)
+			ids := boundedFixIDs
+			if !boundedDisposition {
+				ids = m.selectedFindingIDs(step.StepName)
+			}
 			if len(ids) > 0 {
 				params.FindingIDs = ids
-				if byStep := m.findingInstructions[step.StepName]; len(byStep) > 0 {
-					filtered := make(map[string]string, len(byStep))
-					for _, id := range ids {
-						if note, ok := byStep[id]; ok && note != "" {
-							filtered[id] = note
+				if !boundedDisposition {
+					if byStep := m.findingInstructions[step.StepName]; len(byStep) > 0 {
+						filtered := make(map[string]string, len(byStep))
+						for _, id := range ids {
+							if note, ok := byStep[id]; ok && note != "" {
+								filtered[id] = note
+							}
 						}
-					}
-					if len(filtered) > 0 {
-						params.Instructions = filtered
+						if len(filtered) > 0 {
+							params.Instructions = filtered
+						}
 					}
 				}
 			}
-			if added := m.selectedUserAddedFindings(step.StepName); len(added) > 0 {
+			if boundedDisposition {
+				params.Dispositions = boundedDecisions
+			} else if added := m.selectedUserAddedFindings(step.StepName); len(added) > 0 {
 				params.AddedFindings = append([]types.Finding(nil), added...)
 			}
 		}

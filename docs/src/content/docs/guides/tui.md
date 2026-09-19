@@ -183,8 +183,13 @@ When yolo mode is on, the footer changes from `y yolo` to `y end yolo`.
 | `e` | Edit fix note for the current finding |
 | `+` | Add a user-authored finding |
 | `D` | Delete the current user-authored finding |
+| `v` | Record the disposition and evidence for the current bounded Review finding |
 
 When the instruction editor is open, press `Ctrl+s` or `Ctrl+enter` to save, or `esc` to cancel. In the add-finding editor, use `tab` / `shift+tab` to move between fields, `Ctrl+s` to save, and `esc` to cancel.
+
+At an initial bounded Review gate, selection controls are replaced by `v disposition`. Choose `1 confirmed-fix`, `2 rejected`, `3 deferred`, or `4 escalate`; the editor then moves into the evidence field, where number keys are ordinary text. Press `Tab` to return to disposition selection, enter a non-empty evidence-backed reason, and save with `Ctrl+s`. The action bar enables `f submit dispositions` only after every finding has a decision. It sends only `confirmed-fix` findings to the single consolidated correction. Approve, skip, user-added findings, and yolo are unavailable at this gate because they would bypass worker-owned adjudication.
+
+After the consolidated correction, any `escalate` disposition produces `Review awaiting responsible authority` with only explicit approve, skip, and abort actions. Yolo stops at this gate and cannot approve it automatically. Approval records the responsible authority's decision; it is not another worker correction or review pass.
 
 ### View
 
@@ -219,6 +224,7 @@ Yolo fixes gates with `auto-fix` and `ask-user` findings by selecting every find
 It approves gates with no findings or only `action: no-op` findings as-is, and fixes each step at most once so unresolved findings do not loop forever.
 The [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths) are an exception to this automatic handling.
 So is a Test budget-cut gate that reports `test-agent-unvalidated-work`: approval is refused there, so yolo stops at it and leaves the choice between fix and abort to you (see [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout)).
+Yolo also stops when an adjudicated bounded Review contains `escalate`; the responsible-authority action bar requires an explicit human response.
 
 ## Outcome banner
 
