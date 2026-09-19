@@ -264,7 +264,7 @@ Previous review findings to address:
 Bounded review contract:
 - This is the single full-diff review pass. You are read-only: do not edit files, run formatters, commit, push, or mutate repository state.
 - Complete the entire review before returning. A later correction will not trigger another probabilistic review.
-- Every finding must include a unique stable id, evidence naming the concrete source-backed mechanism, and verification with one focused command or code path the implementation worker can use to confirm or reject it.
+- Every finding must set three separate JSON fields: "id" with a unique stable ID, "evidence" naming the concrete source-backed mechanism, and "verification" with one focused command or code path the implementation worker can use to confirm or reject it.
 - Do not set disposition or disposition_reason. Those decisions belong exclusively to the implementation worker after this report.
 - The burden of proof is on the finding. Do not report speculative hardening, generalization, style preferences, or improvements outside the stated intent.`
 	}
@@ -411,11 +411,15 @@ Risk assessment (after listing all findings):
 	// Findings come only from the attempt that validates. Every other failure
 	// returns at once, and so does a rejection from a turn its deadline or a
 	// cancellation cut short.
+	outputSchema := reviewFindingsSchema
+	if boundedReview {
+		outputSchema = boundedReviewFindingsSchema
+	}
 	opts := agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
 		Env:        sctx.Env,
-		JSONSchema: reviewFindingsSchema,
+		JSONSchema: outputSchema,
 		OnChunk:    sctx.LogChunk,
 		Purpose:    "review",
 		Workload:   workload,

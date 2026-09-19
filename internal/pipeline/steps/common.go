@@ -3,6 +3,7 @@ package steps
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -337,6 +338,62 @@ var reviewFindingsSchema = json.RawMessage(`{
 	},
 	"required": ["findings", "risk_level", "risk_rationale", "risk_scope"]
 }`)
+
+// boundedReviewFindingsSchema preserves the ordinary Review output contract
+// while making the machine-readable fields required by bounded Review
+// representable and mandatory. Deriving it keeps reviewed_paths and every
+// other Review field aligned without changing iterative compatibility.
+var boundedReviewFindingsSchema = mustBoundedReviewFindingsSchema(reviewFindingsSchema)
+
+func mustBoundedReviewFindingsSchema(base json.RawMessage) json.RawMessage {
+	var schema map[string]any
+	if err := json.Unmarshal(base, &schema); err != nil {
+		panic(fmt.Sprintf("derive bounded Review schema: %v", err))
+	}
+
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		panic("derive bounded Review schema: missing properties")
+	}
+	findings, ok := properties["findings"].(map[string]any)
+	if !ok {
+		panic("derive bounded Review schema: missing findings")
+	}
+	item, ok := findings["items"].(map[string]any)
+	if !ok {
+		panic("derive bounded Review schema: missing finding item")
+	}
+	itemProperties, ok := item["properties"].(map[string]any)
+	if !ok {
+		panic("derive bounded Review schema: missing finding properties")
+	}
+
+	itemProperties["evidence"] = map[string]any{
+		"type":        "string",
+		"description": "concrete source-backed mechanism supporting the finding",
+	}
+	itemProperties["verification"] = map[string]any{
+		"type":        "string",
+		"description": "one focused command or code path that can confirm or reject the finding",
+	}
+
+	required, ok := item["required"].([]any)
+	if !ok {
+		panic("derive bounded Review schema: missing finding required fields")
+	}
+	for _, field := range []string{"id", "evidence", "verification"} {
+		if !slices.Contains(required, any(field)) {
+			required = append(required, field)
+		}
+	}
+	item["required"] = required
+
+	derived, err := json.Marshal(schema)
+	if err != nil {
+		panic(fmt.Sprintf("derive bounded Review schema: %v", err))
+	}
+	return derived
+}
 
 // WithCustomGates returns the run's step sequence: the given core pipeline
 // with each repository-declared gate inserted immediately after its anchor core
