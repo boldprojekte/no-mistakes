@@ -265,6 +265,7 @@ Bounded review contract:
 - This is the single full-diff review pass. You are read-only: do not edit files, run formatters, commit, push, or mutate repository state.
 - Complete the entire review before returning. A later correction will not trigger another probabilistic review.
 - Every finding must include a unique stable id, evidence naming the concrete source-backed mechanism, and verification with one focused command or code path the implementation worker can use to confirm or reject it.
+- Do not set disposition or disposition_reason. Those decisions belong exclusively to the implementation worker after this report.
 - The burden of proof is on the finding. Do not report speculative hardening, generalization, style preferences, or improvements outside the stated intent.`
 	}
 
@@ -548,6 +549,9 @@ func validateBoundedReviewFindings(findings Findings, reviewable []string) error
 		seen[id] = true
 		if strings.TrimSpace(finding.Evidence) == "" || strings.TrimSpace(finding.Verification) == "" {
 			return fmt.Errorf("bounded review finding %d must include evidence and verification guidance", i+1)
+		}
+		if strings.TrimSpace(finding.Disposition) != "" || strings.TrimSpace(finding.DispositionReason) != "" {
+			return fmt.Errorf("bounded review finding %s must not include worker-owned disposition fields", id)
 		}
 	}
 	if !reviewedPathsCoverReviewable(findings.ReviewedPaths, reviewable) {

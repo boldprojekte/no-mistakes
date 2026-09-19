@@ -48,6 +48,36 @@ func TestBoundedReviewDispositionEditorRequiresDecisionAndEvidence(t *testing.T)
 	}
 }
 
+func TestBoundedReviewDispositionEditorAcceptsDigitsInEvidence(t *testing.T) {
+	m := newBoundedReviewTUIModel(t)
+	next, _ := m.handleKey(keyMsg("v"))
+	m = next.(Model)
+	next, _ = m.handleKey(keyMsg("1"))
+	m = next.(Model)
+	next, _ = m.handleKey(keyMsg("line 42 proves TestCase2"))
+	m = next.(Model)
+
+	if got := m.editor.dispositionReason.Value(); got != "line 42 proves TestCase2" {
+		t.Fatalf("evidence = %q, want digits preserved", got)
+	}
+	if got := m.editor.dispositionDecision; got != types.FindingDispositionFix {
+		t.Fatalf("disposition = %q, want %q", got, types.FindingDispositionFix)
+	}
+
+	// Selection is an explicit mode, so changing the decision cannot consume
+	// ordinary evidence text accidentally.
+	next, _ = m.handleKey(keyMsg("tab"))
+	m = next.(Model)
+	next, _ = m.handleKey(keyMsg("4"))
+	m = next.(Model)
+	if got := m.editor.dispositionDecision; got != types.FindingDispositionEscalate {
+		t.Fatalf("disposition after selection mode = %q, want %q", got, types.FindingDispositionEscalate)
+	}
+	if got := m.editor.dispositionReason.Value(); got != "line 42 proves TestCase2" {
+		t.Fatalf("evidence changed while selecting disposition: %q", got)
+	}
+}
+
 func TestBoundedReviewTUISubmitsCompleteDispositionSet(t *testing.T) {
 	sock, client, snapshot := captureRespond(t)
 	m := newBoundedReviewTUIModel(t)

@@ -43,6 +43,7 @@ type editorState struct {
 	// bounded Review disposition editor fields
 	dispositionDecision string
 	dispositionReason   textarea.Model
+	dispositionChoosing bool
 
 	// add-finding editor fields
 	addDesc  textarea.Model
@@ -58,13 +59,19 @@ func newDispositionEditor(step types.StepName, findingID string, existing types.
 	reason.CharLimit = 2000
 	reason.SetHeight(5)
 	reason.SetWidth(72)
-	reason.Focus()
+	choosing := existing.Decision == ""
+	if choosing {
+		reason.Blur()
+	} else {
+		reason.Focus()
+	}
 	return &editorState{
 		kind:                editorDisposition,
 		step:                step,
 		findingID:           findingID,
 		dispositionDecision: existing.Decision,
 		dispositionReason:   reason,
+		dispositionChoosing: choosing,
 	}
 }
 
@@ -140,23 +147,36 @@ func (m Model) updateDispositionEditor(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case "esc":
 		m.editor = nil
 		return m, nil
-	case "1":
-		m.editor.dispositionDecision = types.FindingDispositionFix
-		return m, nil
-	case "2":
-		m.editor.dispositionDecision = types.FindingDispositionReject
-		return m, nil
-	case "3":
-		m.editor.dispositionDecision = types.FindingDispositionDefer
-		return m, nil
-	case "4":
-		m.editor.dispositionDecision = types.FindingDispositionEscalate
+	case "tab":
+		m.editor.dispositionChoosing = !m.editor.dispositionChoosing
+		if m.editor.dispositionChoosing {
+			m.editor.dispositionReason.Blur()
+		} else {
+			m.editor.dispositionReason.Focus()
+		}
 		return m, nil
 	case "ctrl+s", "ctrl+enter":
 		if err := m.saveDisposition(); err != nil {
 			m.editor.errorMsg = err.Error()
 			return m, nil
 		}
+		return m, nil
+	}
+	if m.editor.dispositionChoosing {
+		switch key {
+		case "1":
+			m.editor.dispositionDecision = types.FindingDispositionFix
+		case "2":
+			m.editor.dispositionDecision = types.FindingDispositionReject
+		case "3":
+			m.editor.dispositionDecision = types.FindingDispositionDefer
+		case "4":
+			m.editor.dispositionDecision = types.FindingDispositionEscalate
+		default:
+			return m, nil
+		}
+		m.editor.dispositionChoosing = false
+		m.editor.dispositionReason.Focus()
 		return m, nil
 	}
 	var cmd tea.Cmd
@@ -503,7 +523,11 @@ func (m Model) renderDispositionEditor(width int) string {
 		body.WriteString(errStyle.Render("! " + m.editor.errorMsg))
 		body.WriteString("\n")
 	}
-	body.WriteString(dimStyle.Render("1-4 choose  ·  ctrl+s save  ·  esc cancel"))
+	modeHint := "tab choose disposition"
+	if m.editor.dispositionChoosing {
+		modeHint = "1-4 choose"
+	}
+	body.WriteString(dimStyle.Render(modeHint + "  ·  ctrl+s save  ·  esc cancel"))
 
 	title := titleStyle.Render(fmt.Sprintf("Disposition for %s", m.editor.findingID))
 	return renderBoxWithStyledTitle(title, body.String(), boxWidth, "")

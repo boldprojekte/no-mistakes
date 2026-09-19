@@ -802,6 +802,39 @@ func TestValidateBoundedReviewFindings_RequiresExactUniqueStableIDs(t *testing.T
 	}
 }
 
+func TestValidateBoundedReviewFindings_RejectsReviewerOwnedDispositionFields(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		finding Finding
+	}{
+		{
+			name: "disposition",
+			finding: Finding{
+				ID: "review-1", Evidence: "source trace", Verification: "focused test",
+				Disposition: types.FindingDispositionFix,
+			},
+		},
+		{
+			name: "disposition reason",
+			finding: Finding{
+				ID: "review-1", Evidence: "source trace", Verification: "focused test",
+				DispositionReason: "reviewer claims it reproduced the defect",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateBoundedReviewFindings(Findings{
+				Items:         []Finding{tc.finding},
+				ReviewedPaths: []string{"feature.txt"},
+			}, []string{"feature.txt"})
+			if err == nil || !strings.Contains(err.Error(), "must not include worker-owned disposition fields") {
+				t.Fatalf("error = %v, want worker-owned disposition rejection", err)
+			}
+		})
+	}
+}
+
 func TestReviewStep_BoundedInformationalFindingStillRequiresDisposition(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
