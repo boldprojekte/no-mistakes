@@ -694,6 +694,31 @@ func TestReviewStep_BoundedCorrectionRunsFixerOnceWithoutRereview(t *testing.T) 
 	}
 }
 
+func TestReviewStep_BoundedCorrectionCannotApproveANoOpFix(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: json.RawMessage(`{"summary":"claim fix without changes"}`)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Review.Strategy = config.ReviewStrategyBounded
+	sctx.Fixing = true
+	sctx.PreviousFindings = `{"review_strategy":"bounded","findings":[{"id":"review-1","severity":"error","file":"feature.txt","description":"confirmed bug","evidence":"concrete trace","verification":"run focused test","disposition":"confirmed-fix","disposition_reason":"reproduced"}]}`
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "made no repository change") {
+		t.Fatalf("outcome = %+v, error = %v, want no-op correction rejection", outcome, err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("agent calls = %d, want one fixer and no rereviewer", len(ag.calls))
+	}
+	if sctx.Run.HeadSHA != headSHA {
+		t.Fatalf("run head = %s, want unchanged %s", sctx.Run.HeadSHA, headSHA)
+	}
+}
+
 func TestReviewStep_BoundedMalformedReportDoesNotStartAnotherFullReview(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

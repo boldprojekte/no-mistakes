@@ -169,6 +169,9 @@ Previous review findings to address:
 		if err != nil {
 			return nil, err
 		}
+		if boundedReview && summary == NoChangesAppliedSummary {
+			return nil, errors.New("bounded Review correction made no repository change for confirmed findings")
+		}
 		fixSummary = summary
 	}
 	if boundedReview && sctx.Fixing {
